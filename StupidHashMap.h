@@ -22,7 +22,6 @@ inline uint64_t get_hash_index(uint64_t a) {
     alignas(16) uint64_t input_block[2] = {a, a};  // or {input, input} if you prefer
     __m128i data = _mm_loadu_si128(reinterpret_cast<const __m128i*>(input_block));
 
-    // Perform one AESENC round
     __m128i result = _mm_aesenc_si128(_mm_aesenc_si128(_mm_aesenc_si128(data, key), key), key);
 
     // Extract and return the lower 64 bits of the result
@@ -54,7 +53,7 @@ struct StupidHashMap {
     std::atomic<int> count;  // lazily updated by threads
 
     StupidHashMap(uint64_t needed_capacity) : cap_lg2(std::max(64 - __builtin_clzll(needed_capacity - 1), MIN_CAP_LG2)) {
-        auto huge = 0; //cap_lg2 > 20 ? (MAP_HUGETLB | (30 << MAP_HUGE_SHIFT)) : 0;
+        auto huge = cap_lg2 > 20 ? (MAP_HUGETLB | (30 << MAP_HUGE_SHIFT)) : 0;
         data = (uint64_t*)mmap(NULL, std::max(capacity() * sizeof(uint64_t), 4096UL), PROT_READ | PROT_WRITE,
                 MAP_PRIVATE | MAP_ANONYMOUS | huge, -1, 0);
         if (data == MAP_FAILED) {
@@ -72,6 +71,14 @@ struct StupidHashMap {
     StupidHashMap(const std::vector<uint64_t>& v) : StupidHashMap(v.size()) {
         for (auto p : v) {
             insert(p);
+        }
+    }
+
+    void parallel_clear() {
+#pragma omp parallel for
+        for (size_t i = 0; i < capacity(); i += 8) {
+            __m512i zero = _mm512_setzero_si512();
+            _mm512_storeu_si512(data + i, zero);
         }
     }
 
@@ -154,7 +161,7 @@ struct StupidHashMap {
     }
 
     void parallel_copy_into(std::vector<uint64_t>& six) {
-        if (capacity() < 1000000) {
+        if (capacity() < 100000) {
             six.resize(0);
             serial_for_each([&] (uint64_t a) {
                 six.push_back(a);
@@ -187,20 +194,35 @@ struct StupidHashMap {
             S += tmp;
         }
 
-        six.resize(0); // so that old elements don't need to be preserved
-        six.resize(S);  // TODO skip zero-fill
+        six.clear();
+        six.reserve(S);  // TODO skip zero-fill
+
+        auto p = six.data();
 
 #pragma omp parallel
         {
             int tid = omp_get_thread_num();
             size_t write_i = count[tid];
-            for (size_t offs = ranges[tid]; offs < ranges[tid + 1]; ++offs) {
+            size_t offs = ranges[tid];
+
+            for (; offs + 8 <= ranges[tid + 1]; offs += 8) {
+                __m512i d = _mm512_loadu_si512(&data[offs]);
+                _mm512_storeu_si512(&data[offs], _mm512_setzero_si512());
+                __mmask8 nonzero = _mm512_test_epi64_mask(d, d);
+                __m512i compressed = _mm512_maskz_compress_epi64(nonzero, d); // avoid zen4 microcoded vpcompressq [mem]
+                _mm512_mask_storeu_epi64(&six[write_i], _pext_u32((uint32_t)-1, nonzero), compressed);
+                write_i += __builtin_popcount(nonzero);
+            }
+
+            for (; offs < ranges[tid + 1]; ++offs) {  // handle tail
                 if (data[offs]) {
                     six[write_i++] = data[offs];
+                    data[offs] = 0;
                 }
             }
-            std::sort(six.begin() + count[tid], six.begin() + write_i);
         }
+
+        six.insert(six.end(), p, p + S); // silly hack to avoid writing twice
     }
 };
 

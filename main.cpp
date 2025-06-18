@@ -10,6 +10,22 @@
 thread_local std::vector<uint64_t> next_tl;
 thread_local std::vector<uint64_t> next_tl2;
 
+#define SHOW_TIMINGS 1
+
+template <typename Func>
+void timed_run(const std::string& label, Func&& f) {
+#if SHOW_TIMINGS
+    auto start = std::chrono::high_resolution_clock::now();
+#endif
+    f();  // call the function
+#if SHOW_TIMINGS
+    auto end = std::chrono::high_resolution_clock::now();
+
+    std::chrono::duration<double> elapsed = end - start;
+    std::cout << label << " took " << elapsed.count() << " seconds.\n";
+#endif
+}
+
 int main()
 {
     uint32_t current_tile_sum = 4;  // 4, 6, 8
@@ -49,7 +65,7 @@ int main()
         auto start = std::chrono::steady_clock::now();
 
         // Build c3 from c1, c2
-        #pragma omp parallel for
+#pragma omp parallel for
         for (size_t i = 0; i < four.size(); ++i) {
             list_successors(next_tl, four[i], 2);
             std::sort(next_tl.begin(), next_tl.end());
@@ -58,29 +74,38 @@ int main()
                 c3.insert(succ);
             }
         }
-        #pragma omp parallel for
+
+#pragma omp parallel for
         for (size_t i = 0; i < six.size(); ++i) {
             list_successors(next_tl, six[i], 1);
+            std::sort(next_tl.begin(), next_tl.end());
+            next_tl.erase(std::unique(next_tl.begin(), next_tl.end()), next_tl.end());
             for (auto succ : next_tl) {
                 c3.insert(succ);
             }
         }
 
-        auto end = std::chrono::steady_clock::now();
-        compute_time[current_tile_sum + 4] = (size_t)((end - start).count() / 1000);
 
         // c1 = c2, c2 = c3, allocate new c3
         std::swap(four, six);
-        c3.parallel_copy_into(six);
-
-        count[current_tile_sum + 4] = six.size();
-        print_stats();
-        std::cout << "Generation rate: " << (count[current_tile_sum + 4] / (double)compute_time[current_tile_sum + 4]) << "M positions/sec" << '\n';
+        timed_run("parallel copy",
+        [&] { c3.parallel_copy_into(six); });
 
         auto next = (uint64_t)(1.5 * six.size());
         std::cout << "Allocating " << next << " for tile sum " << (current_tile_sum + 6) << '\n';
-        c3.~StupidHashMap();
-        new (&c3) StupidHashMap(next);
+
+        if (c3.capacity() < next || next <  100000) {
+            c3.~StupidHashMap();
+            new (&c3) StupidHashMap(next);
+        }
+
+        count[current_tile_sum + 4] = six.size();
+        auto end = std::chrono::steady_clock::now();
+        compute_time[current_tile_sum + 4] = (size_t)((end - start).count() / 1000);
+
+        print_stats();
+        std::cout << "Generation rate: " << (count[current_tile_sum + 4] / (double)compute_time[current_tile_sum + 4]) << "M positions/sec" << '\n';
+
     }
 
     /*
