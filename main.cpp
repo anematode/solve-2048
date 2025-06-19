@@ -110,12 +110,121 @@ bool compress_data(const char* data, size_t bytes, const std::string& filename) 
     return true;
 }
 
+
+struct Vectorish {
+    virtual uint64_t& operator[] (size_t index) = 0;
+    virtual size_t size();
+    virtual ~Vectorish();
+};
+
+struct StdVectorWrapper : public Vectorish {
+    std::vector<uint64_t> contents;
+
+    uint64_t& operator[] (size_t index) override {
+        return contents[index];
+    }
+    size_t size() override {
+        return contents.size();
+    }
+    void push_back(uint64_t data) {
+        contents.push_back(data);
+    }
+};
+
+struct FixedSizeBackedWrapper : public Vectorish {
+    std::string filename; // Stores the name of the temporary file
+    uint64_t *mapped;     // Pointer to the memory-mapped region
+    size_t size_;         // Logical size (number of uint64_t elements)
+    int fd;               // File descriptor for the temporary file
+
+    // Constructor: Initializes the wrapper with a specified size,
+    // creating and mapping a temporary file.
+    FixedSizeBackedWrapper(size_t size) : mapped(nullptr), size_(0), fd(-1) {
+        if (size == 0) {
+            size_ = 0;
+            return;
+        }
+        size_t bytes_to_map;
+        if (__builtin_mul_overflow(size, sizeof(uint64_t), &bytes_to_map)) {
+            throw std::runtime_error("FixedSizeBackedWrapper: Size calculation overflow, requested size too large.");
+        }
+
+        char temp_filename_template[] = "/tmp/fixed_backed_XXXXXX"; // Template for mkstemp
+        fd = mkstemp(temp_filename_template);
+        if (fd == -1) {
+            throw std::runtime_error("FixedSizeBackedWrapper: Failed to create temporary file.");
+        }
+        filename = temp_filename_template;
+        if (ftruncate(fd, bytes_to_map) == -1) {
+            close(fd);
+            unlink(filename.c_str());
+            throw std::runtime_error("FixedSizeBackedWrapper: Failed to set file size with ftruncate.");
+        }
+
+        mapped = static_cast<uint64_t*>(mmap(nullptr, bytes_to_map, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0));
+        if (mapped == MAP_FAILED) {
+            close(fd);
+            unlink(filename.c_str());
+            throw std::runtime_error("FixedSizeBackedWrapper: Failed to mmap file.");
+        }
+
+        size_ = size;
+    }
+
+    uint64_t *begin() {
+        return mapped;
+    }
+
+    uint64_t *end() {
+        return mapped + size_;
+    }
+
+    uint64_t& operator[] (size_t index) override {
+        if (index >= size_) {
+            throw std::out_of_range("FixedSizeBackedWrapper: Index out of bounds");
+        }
+        return mapped[index];
+    }
+
+    size_t size() override {
+        return size_;
+    }
+
+    ~FixedSizeBackedWrapper() override {
+        if (mapped != nullptr && mapped != MAP_FAILED) {
+            size_t bytes_to_unmap = 0;
+            if (size_ > 0) {
+                 bytes_to_unmap = size_ * sizeof(uint64_t);
+            }
+            if (bytes_to_unmap > 0) {
+                if (munmap(mapped, bytes_to_unmap) == -1) {
+                    std::cerr << "Warning: Failed to munmap memory in FixedSizeBackedWrapper destructor." << std::endl;
+                }
+            }
+        }
+
+        // Close the file descriptor if it's valid.
+        if (fd != -1) {
+            if (close(fd) == -1) {
+                 std::cerr << "Warning: Failed to close file descriptor in FixedSizeBackedWrapper destructor." << std::endl;
+            }
+        }
+
+        // Unlink (delete) the temporary file if its name is known.
+        if (!filename.empty()) {
+            if (unlink(filename.c_str()) == -1) {
+                std::cerr << "Warning: Failed to unlink temporary file in FixedSizeBackedWrapper destructor." << std::endl;
+            }
+        }
+    }
+};
+
 int main()
 {
     uint32_t h1_tile_sum = 4;  // 4, 6, 8
-    omp_set_num_threads(omp_get_max_threads());
+omp_set_num_threads(omp_get_max_threads());
 
-    std::vector<uint64_t> h1, h2, h3;
+    std::vector<uint64_t>  h1, h2, h3;
     std::vector<uint64_t> all = starting_positions();
 
     for (auto b : all) {
@@ -174,38 +283,7 @@ int main()
         timed_run("parallel copy",
         [&] { c3.parallel_copy_into(h2); });
 
-        timed_run("parallel sort", [&] {
-            std::sort(std::execution::par_unseq, h2.begin(), h2.end());
-        });
-
-        int without_match = 0;
-#pragma omp parallel for reduction(+:without_match)
-        for (int i = 0; i < h2.size(); ++i) {
-            auto m = h2[i];
-            int triad[3] = { 0, 1, 2 };
-            for (auto cycle : { 0x012, 0x021, 0x102, 0x120, 0x201 }) {
-                auto t = m;
-                for (int j = 0; j < 3; ++j) {
-                    t = set_tile(t, get_tile(m, triad[(cycle >> 4 * j) & 0xf]), triad[j]);
-                }
-                if (std::binary_search(h2.begin(), h2.end(), t))
-                    goto found;
-            }
-            without_match += 1;
-            found:;
-        }
-
-        std::cout << "[-] Positions without match: " << without_match << '\n';
-        std::cout << "[-] Total positions: " << h2.size() << '\n';
-        std::cout << "[-] Fraction: " << without_match / (double)h2.size() << '\n';
-            /*
-            timed_run("compressing data", [&] {
-                compress_data((const char*)h2.data(), h2.size() * sizeof(h2[0]),
-        "./lists/" + std::to_string(h1_tile_sum + 2) + ".zst");
-            });
-            */
-
-        auto next = std::max((uint64_t)(1.25 * h2.size()), 10000000UL);
+        auto next = std::max((uint64_t)(1.2 * h2.size()), 10000000UL);
         std::cout << "Allocating " << next << " for tile sum " << (h1_tile_sum + 6) << '\n';
 
         if (c3.capacity() < next || next < 100000) {
@@ -219,32 +297,5 @@ int main()
 
         print_stats();
         std::cout << "Generation rate: " << (count[h1_tile_sum + 4] / (double)compute_time[h1_tile_sum + 4]) << "M positions/sec" << '\n';
-
     }
-
-    /*
-    StupidHashMap set(1'000'000'000);
-    auto start = std::chrono::steady_clock::now();
-
-    omp_set_num_threads(96);
-
-    // Insert 1 billion numbers
-#pragma omp parallel for
-    for (int i = 1; i < 1'000'000'000; ++i) {
-        auto b = i % 100'000'000;
-        if (b) {
-            set.insert(b);
-        }
-    }
-
-    auto elapsed = std::chrono::steady_clock::now() - start;
-    std::cout << "Elapsed: " << (double)elapsed.count() / 1e9 << '\n';
-
-    start = std::chrono::steady_clock::now();
-    std::cout << "Count: " << set.parallel_count() << '\n';
-    elapsed = std::chrono::steady_clock::now() - start;
-    std::cout << "Elapsed: " << (double)elapsed.count() / 1e9 << '\n';
-
-    return 0;
-    */
 }

@@ -157,15 +157,6 @@ void get_rotations(uint64_t tiles, uint64_t arr[4]) {
 	_mm256_storeu_si256((__m256i*)arr, goose);
 }
 
-uint64_t compress_position(uint64_t position, int tile_sum) {
-	assert(::tile_sum(position) == tile_sum);
-	return 0;
-}
-
-uint64_t uncompress_packed_position(uint64_t position, int tile_sum) {
-	return 0;
-}
-
 uint8_t max_tile(uint64_t tile) {
 	uint8_t max = 0;
 	for (int i = 0; i < 16; ++i) {

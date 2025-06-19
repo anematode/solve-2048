@@ -10,7 +10,8 @@ set(SOURCES StupidHashMap.h
         MoveLUT.cpp
         Compressor.h
         doctest.h
-        Test.cpp)
+        Test.cpp
+        libdivide.h)
 
 add_library(solve_2048_lib ${SOURCES})
 add_executable(solve_2048 main.cpp)

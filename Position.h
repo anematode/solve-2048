@@ -22,6 +22,10 @@ namespace constants {
         reflect_tr = 0x048c159d26ae37bf;
 }
 
+// High 6 bits: bitset of permutations. Low six bits: canonical position, shifted down by 4 (reconstruct
+// final nibble using tile sum)
+using Packed6Perm = uint64_t;
+
 void canonicalize_positions(uint64_t positions[8]);
 uint64_t set_tile(uint64_t tiles, uint8_t tile, int idx);
 uint8_t get_tile(uint64_t tiles, int idx);

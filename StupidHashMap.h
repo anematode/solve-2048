@@ -10,6 +10,7 @@
 #include <immintrin.h>
 #include <sys/mman.h>
 #include <atomic>
+#include "libdivide.h"
 
 inline uint64_t get_hash_index(uint64_t a) {
     uint8_t key_bytes[16] = {
@@ -46,19 +47,29 @@ inline size_t count_nonzero(const uint64_t *begin, const uint64_t *end) {
 
 constexpr int MIN_CAP_LG2 = 12; /* 4096 */
 
+uint64_t goose_mod(uint64_t uint64, uint64_t cap, const libdivide::divider<uint64_t>& divider) {
+    return uint64 - cap * (uint64 / divider);
+}
+
 struct StupidHashMap {
     uint64_t *data;
-    uint32_t cap_lg2;
+    uint64_t cap;
+    libdivide::divider<uint64_t> cap_divider;
 
     std::atomic<int> count;  // lazily updated by threads
 
-    StupidHashMap(uint64_t needed_capacity) : cap_lg2(std::max(64 - __builtin_clzll(needed_capacity - 1), MIN_CAP_LG2)) {
-        auto huge = cap_lg2 > 20 ? (MAP_HUGETLB | (30 << MAP_HUGE_SHIFT)) : 0;
-        data = (uint64_t*)mmap(NULL, std::max(capacity() * sizeof(uint64_t), 4096UL), PROT_READ | PROT_WRITE,
+    StupidHashMap(uint64_t needed_capacity) : cap((needed_capacity + 4095) & ~4095ULL) {
+        new (&cap_divider) libdivide::divider<uint64_t>(cap);
+        auto huge = cap > (1 << 20) ? (MAP_HUGETLB | (30 << MAP_HUGE_SHIFT)) : 0;
+        try_again:;
+        data = (uint64_t*)mmap(NULL, capacity() * sizeof(uint64_t), PROT_READ | PROT_WRITE,
                 MAP_PRIVATE | MAP_ANONYMOUS | huge, -1, 0);
         if (data == MAP_FAILED) {
             std::cerr << "Failed to allocate " << capacity() << " words (huge TLB working?)\n";
-            throw std::bad_alloc();
+            if (!huge)
+                throw std::bad_alloc();
+            huge = 0;
+            goto try_again;
         }
         madvise(data, capacity(), MADV_WILLNEED);
 
@@ -89,7 +100,7 @@ struct StupidHashMap {
 
         data = rhs.data;
         rhs.data = nullptr;
-        cap_lg2 = rhs.cap_lg2;
+        cap = rhs.cap;
         count = rhs.count.load();
         return *this;
     }
@@ -115,17 +126,20 @@ struct StupidHashMap {
     }
 
     size_t capacity() const {
-        return 1ULL << cap_lg2;
+        return cap;
     }
 
     bool contains(uint64_t entry) const {
         assert(entry && "SHM can't store a 0");
-        uint64_t index = get_hash_index(entry) & (capacity() - 1);
+        uint64_t index = goose_mod(get_hash_index(entry), cap, cap_divider);
         while (data[index] != 0) {
             if (data[index] == entry) {
                 return true;
             }
-            index = (index + 1) % capacity();
+            index++;
+            if (index == capacity()) {
+                index = 0;
+            }
         }
         return false;
     }
@@ -134,12 +148,15 @@ struct StupidHashMap {
     bool insert(uint64_t entry) {
         assert(entry && "SHM can't store a 0");
         try_again:
-        uint64_t index = get_hash_index(entry) % capacity();
+        uint64_t index = goose_mod(get_hash_index(entry), cap, cap_divider);
         while (data[index] != 0) {
             if (data[index] == entry) {
                 return false;
             }
-            index = (index + 1) % capacity();
+            index++;
+            if (index == capacity()) {
+                index = 0;
+            }
         }
         uint64_t expected = 0;
         bool success = __atomic_compare_exchange_n(&data[index], &expected, entry, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
