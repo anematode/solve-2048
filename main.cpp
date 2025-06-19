@@ -112,26 +112,26 @@ bool compress_data(const char* data, size_t bytes, const std::string& filename) 
 
 int main()
 {
-    uint32_t current_tile_sum = 4;  // 4, 6, 8
+    uint32_t h1_tile_sum = 4;  // 4, 6, 8
     omp_set_num_threads(omp_get_max_threads());
 
-    std::vector<uint64_t> four, six, eight;
+    std::vector<uint64_t> h1, h2, h3;
     std::vector<uint64_t> all = starting_positions();
 
     for (auto b : all) {
         auto sum = tile_sum(b);
-        (sum == 4 ? four : sum == 6 ? six : eight).push_back(b);
+        (sum == 4 ? h1 : sum == 6 ? h2 : h3).push_back(b);
     }
 
-    StupidHashMap c3(eight);
+    StupidHashMap c3(h3);
 
     // Build additional elements of c2 from c1
     std::vector<uint64_t> next;
-    std::for_each(four.begin(), four.end(), [&] (uint64_t pos) {
+    std::for_each(h1.begin(), h1.end(), [&] (uint64_t pos) {
         list_successors(next, pos, 1);
         for (auto succ : next) {
-            if (std::find(six.begin(), six.end(), succ) == six.end()) {
-                six.push_back(succ);
+            if (std::find(h2.begin(), h2.end(), succ) == h2.end()) {
+                h2.push_back(succ);
             }
         }
     });
@@ -140,18 +140,18 @@ int main()
     std::unordered_map<uint32_t, size_t> count;
 
     auto print_stats = [&] () {
-        std::cout << "Tile sum " << (current_tile_sum + 4) << ": " << count[current_tile_sum + 4] << '\n';
+        std::cout << "Tile sum " << (h1_tile_sum + 4) << ": " << count[h1_tile_sum + 4] << '\n';
     };
 
     while (true) {
-        current_tile_sum += 2;
+        h1_tile_sum += 2;
 
         auto start = std::chrono::steady_clock::now();
 
         // Build c3 from c1, c2
 #pragma omp parallel for
-        for (size_t i = 0; i < four.size(); ++i) {
-            list_successors(next_tl, four[i], 2);
+        for (size_t i = 0; i < h1.size(); ++i) {
+            list_successors(next_tl, h1[i], 2);
             std::sort(next_tl.begin(), next_tl.end());
             next_tl.erase(std::unique(next_tl.begin(), next_tl.end()), next_tl.end());
             for (auto succ : next_tl) {
@@ -160,8 +160,8 @@ int main()
         }
 
 #pragma omp parallel for
-        for (size_t i = 0; i < six.size(); ++i) {
-            list_successors(next_tl, six[i], 1);
+        for (size_t i = 0; i < h2.size(); ++i) {
+            list_successors(next_tl, h2[i], 1);
             std::sort(next_tl.begin(), next_tl.end());
             next_tl.erase(std::unique(next_tl.begin(), next_tl.end()), next_tl.end());
             for (auto succ : next_tl) {
@@ -170,34 +170,55 @@ int main()
         }
 
         // c1 = c2, c2 = c3, allocate new c3
-        std::swap(four, six);
+        std::swap(h1, h2);
         timed_run("parallel copy",
-        [&] { c3.parallel_copy_into(six); });
+        [&] { c3.parallel_copy_into(h2); });
 
-        if ((current_tile_sum + 2) % 50 == 0) {
-            timed_run("parallel sort", [&] {
-                std::sort(std::execution::par_unseq, six.begin(), six.end());
-            });
-            timed_run("compressing data", [&] {
-                compress_data((const char*)six.data(), six.size() * sizeof(six[0]),
-        "./lists/" + std::to_string(current_tile_sum + 2) + ".zst");
-            });
+        timed_run("parallel sort", [&] {
+            std::sort(std::execution::par_unseq, h2.begin(), h2.end());
+        });
+
+        int without_match = 0;
+#pragma omp parallel for reduction(+:without_match)
+        for (int i = 0; i < h2.size(); ++i) {
+            auto m = h2[i];
+            int triad[3] = { 0, 1, 2 };
+            for (auto cycle : { 0x012, 0x021, 0x102, 0x120, 0x201 }) {
+                auto t = m;
+                for (int j = 0; j < 3; ++j) {
+                    t = set_tile(t, get_tile(m, triad[(cycle >> 4 * j) & 0xf]), triad[j]);
+                }
+                if (std::binary_search(h2.begin(), h2.end(), t))
+                    goto found;
+            }
+            without_match += 1;
+            found:;
         }
 
-        auto next = std::max((uint64_t)(1.25 * six.size()), 10000000UL);
-        std::cout << "Allocating " << next << " for tile sum " << (current_tile_sum + 6) << '\n';
+        std::cout << "[-] Positions without match: " << without_match << '\n';
+        std::cout << "[-] Total positions: " << h2.size() << '\n';
+        std::cout << "[-] Fraction: " << without_match / (double)h2.size() << '\n';
+            /*
+            timed_run("compressing data", [&] {
+                compress_data((const char*)h2.data(), h2.size() * sizeof(h2[0]),
+        "./lists/" + std::to_string(h1_tile_sum + 2) + ".zst");
+            });
+            */
+
+        auto next = std::max((uint64_t)(1.25 * h2.size()), 10000000UL);
+        std::cout << "Allocating " << next << " for tile sum " << (h1_tile_sum + 6) << '\n';
 
         if (c3.capacity() < next || next < 100000) {
             c3.~StupidHashMap();
             new (&c3) StupidHashMap(next);
         }
 
-        count[current_tile_sum + 4] = six.size();
+        count[h1_tile_sum + 4] = h2.size();
         auto end = std::chrono::steady_clock::now();
-        compute_time[current_tile_sum + 4] = (size_t)((end - start).count() / 1000);
+        compute_time[h1_tile_sum + 4] = (size_t)((end - start).count() / 1000);
 
         print_stats();
-        std::cout << "Generation rate: " << (count[current_tile_sum + 4] / (double)compute_time[current_tile_sum + 4]) << "M positions/sec" << '\n';
+        std::cout << "Generation rate: " << (count[h1_tile_sum + 4] / (double)compute_time[h1_tile_sum + 4]) << "M positions/sec" << '\n';
 
     }
 

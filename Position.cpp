@@ -81,10 +81,13 @@ void canonicalize_positions(uint64_t positions[8]) {
 }
 
 uint64_t canonicalize_position(uint64_t position) {
-	// TODO optimize for this case
-	uint64_t positions[8] = { position };
-	canonicalize_positions(positions);
-	return positions[0];
+	__m512i shuffled = shuffle_nibbles(
+		_mm512_set1_epi64(position),
+		_mm512_set_epi64(constants::identity, constants::rotate_90,
+			constants::rotate_180, constants::rotate_270, constants::reflect_h, constants::reflect_v,
+			constants::reflect_tl, constants::reflect_tr)
+	);
+	return _mm512_reduce_min_epu64(shuffled);
 }
 
 uint64_t set_tile(uint64_t tiles, uint8_t tile, int idx) {
@@ -152,6 +155,23 @@ void get_rotations(uint64_t tiles, uint64_t arr[4]) {
 	__m256i rotations = _mm256_set_epi64x(constants::rotate_90, constants::rotate_180, constants::rotate_270, constants::identity);
 	__m256i goose = shuffle_nibbles(data, rotations);
 	_mm256_storeu_si256((__m256i*)arr, goose);
+}
+
+uint64_t compress_position(uint64_t position, int tile_sum) {
+	assert(::tile_sum(position) == tile_sum);
+	return 0;
+}
+
+uint64_t uncompress_packed_position(uint64_t position, int tile_sum) {
+	return 0;
+}
+
+uint8_t max_tile(uint64_t tile) {
+	uint8_t max = 0;
+	for (int i = 0; i < 16; ++i) {
+		max = std::max(max, (uint8_t)((tile >> (4 * i)) & 0xf));
+	}
+	return max;
 }
 
 void list_successors(std::vector<uint64_t> &vec, uint64_t tiles, int tile) {

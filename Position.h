@@ -30,6 +30,11 @@ std::string position_to_string(uint64_t tiles);
 uint32_t tile_sum(uint64_t tiles);
 std::vector<uint64_t> starting_positions();
 void get_rotations(uint64_t tiles, uint64_t arr[4]);
+int count_symmetries(uint64_t position);
+// Get the (representation of) the maximum tile in the position.
+uint8_t max_tile(uint64_t tile);
+// Compress position containing at most the tile 1024 (2^11) using the encoding t1*
+uint64_t compress_small_position(uint64_t pos, int tile_sum);
 
 void list_successors(std::vector<uint64_t>& vec, uint64_t tiles, int tile);
 
