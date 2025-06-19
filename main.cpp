@@ -219,6 +219,25 @@ struct FixedSizeBackedWrapper : public Vectorish {
     }
 };
 
+void census(const std::vector<uint64_t> & h2, int tile_sum) {
+    uint64_t max_2 = 0, max_4 = 0, max_8 = 0, max_16 = 0, max_32 = 0, max_64 = 0, max_128 = 0, max_256 = 0, max_512 = 0;
+#pragma omp parallel for reduction(+:max_2,max_4,max_8,max_16,max_32,max_64,max_128,max_256,max_512)
+    for (size_t i = 0; i < h2.size(); ++i) {
+        auto tile = max_tile(h2[i]);
+        max_2 += tile == 1;
+        max_4 += tile == 2;
+        max_8 += tile == 3;
+        max_16 += tile == 4;
+        max_32 += tile == 5;
+        max_64 += tile == 6;
+        max_128 += tile == 7;
+        max_256 += tile == 8;
+        max_512 += tile == 9;
+    }
+    std::cout << "Census for tile sum " << tile_sum << ": " << max_2 << ',' << max_4 << ',' <<
+         max_8 << ',' << max_16 << ',' << max_32 << ',' << max_64 << ',' << max_128 << ',' << max_256 << ',' << max_512 << '\n';
+}
+
 int main()
 {
     uint32_t h1_tile_sum = 4;  // 4, 6, 8
@@ -249,7 +268,7 @@ omp_set_num_threads(omp_get_max_threads());
     std::unordered_map<uint32_t, size_t> count;
 
     auto print_stats = [&] () {
-        std::cout << "Tile sum " << (h1_tile_sum + 4) << ": " << count[h1_tile_sum + 4] << '\n';
+        std::cout << "Tile sum " << (h1_tile_sum + 2) << ": " << count[h1_tile_sum + 2] << '\n';
     };
 
     while (true) {
@@ -283,7 +302,9 @@ omp_set_num_threads(omp_get_max_threads());
         timed_run("parallel copy",
         [&] { c3.parallel_copy_into(h2); });
 
-        auto next = std::max((uint64_t)(1.2 * h2.size()), 10000000UL);
+        census(h2, h1_tile_sum + 2);
+
+        auto next = std::max({ std::min((2 * h2.size()), 69793218560UL), (uint64_t)(1.2 * h2.size()), 10000000UL });
         std::cout << "Allocating " << next << " for tile sum " << (h1_tile_sum + 6) << '\n';
 
         if (c3.capacity() < next || next < 100000) {
@@ -291,11 +312,11 @@ omp_set_num_threads(omp_get_max_threads());
             new (&c3) StupidHashMap(next);
         }
 
-        count[h1_tile_sum + 4] = h2.size();
+        count[h1_tile_sum + 2] = h2.size();
         auto end = std::chrono::steady_clock::now();
-        compute_time[h1_tile_sum + 4] = (size_t)((end - start).count() / 1000);
+        compute_time[h1_tile_sum + 2] = (size_t)((end - start).count() / 1000);
 
         print_stats();
-        std::cout << "Generation rate: " << (count[h1_tile_sum + 4] / (double)compute_time[h1_tile_sum + 4]) << "M positions/sec" << '\n';
+        std::cout << "Generation rate: " << (count[h1_tile_sum + 2] / (double)compute_time[h1_tile_sum + 2]) << "M positions/sec" << '\n';
     }
 }
