@@ -2,7 +2,14 @@
 #include <chrono>
 #include <tbb/concurrent_unordered_set.h>
 #include <tbb/parallel_for.h>
+#include <zstd.h>
+#include <zstd_errors.h>
 #include <omp.h>
+#include <execution>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 
 #include "StupidHashMap.h"
 #include "Position.h"
@@ -24,6 +31,83 @@ void timed_run(const std::string& label, Func&& f) {
     std::chrono::duration<double> elapsed = end - start;
     std::cout << label << " took " << elapsed.count() << " seconds.\n";
 #endif
+}
+
+bool compress_data(const char* data, size_t bytes, const std::string& filename) {
+    // Estimate max compressed size
+    size_t maxCompressedSize = ZSTD_compressBound(bytes);
+
+    // Open and truncate file to maxCompressedSize
+    int fd = open(filename.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        perror("open");
+        return false;
+    }
+    if (ftruncate(fd, maxCompressedSize) != 0) {
+        perror("ftruncate");
+        close(fd);
+        return false;
+    }
+
+    // mmap the output file
+    void* mmap_ptr = mmap(nullptr, maxCompressedSize, PROT_WRITE | PROT_READ, MAP_SHARED, fd, 0);
+    if (mmap_ptr == MAP_FAILED) {
+        perror("mmap");
+        close(fd);
+        return false;
+    }
+
+    ZSTD_CCtx* cctx = ZSTD_createCCtx();
+    if (!cctx) {
+        std::cerr << "Failed to create ZSTD_CCtx\n";
+        munmap(mmap_ptr, maxCompressedSize);
+        close(fd);
+        return false;
+    }
+
+    // Fastest compression level
+    ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel, 1);
+
+    // Use all hardware threads
+    unsigned threads = std::thread::hardware_concurrency();
+    ZSTD_CCtx_setParameter(cctx, ZSTD_c_nbWorkers, threads);
+
+    std::cout << "Compressing " << bytes / (1024 * 1024) << " MB using " << threads << " threads...\n";
+    auto start = std::chrono::high_resolution_clock::now();
+
+    // Perform compression directly into the mmap'd buffer
+    size_t compressedSize = ZSTD_compress2(
+        cctx,
+        mmap_ptr, maxCompressedSize,
+        data, bytes
+    );
+
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = end - start;
+
+    if (ZSTD_isError(compressedSize)) {
+        std::cerr << "Compression failed: " << ZSTD_getErrorName(compressedSize) << "\n";
+        ZSTD_freeCCtx(cctx);
+        munmap(mmap_ptr, maxCompressedSize);
+        close(fd);
+        return false;
+    }
+
+    // Truncate file to actual compressed size
+    if (ftruncate(fd, compressedSize) != 0) {
+        perror("ftruncate to final size");
+    }
+
+    munmap(mmap_ptr, maxCompressedSize);
+    close(fd);
+    ZSTD_freeCCtx(cctx);
+
+    std::cout << "Compression done in " << elapsed.count() << " seconds\n";
+    std::cout << "Original size: " << bytes << " bytes\n";
+    std::cout << "Compressed size: " << compressedSize << " bytes\n";
+    std::cout << "Compression ratio: " << static_cast<double>(bytes) / compressedSize << "\n";
+
+    return true;
 }
 
 int main()
@@ -85,16 +169,25 @@ int main()
             }
         }
 
-
         // c1 = c2, c2 = c3, allocate new c3
         std::swap(four, six);
         timed_run("parallel copy",
         [&] { c3.parallel_copy_into(six); });
 
-        auto next = (uint64_t)(1.5 * six.size());
+        if ((current_tile_sum + 2) % 50 == 0) {
+            timed_run("parallel sort", [&] {
+                std::sort(std::execution::par_unseq, six.begin(), six.end());
+            });
+            timed_run("compressing data", [&] {
+                compress_data((const char*)six.data(), six.size() * sizeof(six[0]),
+        "./lists/" + std::to_string(current_tile_sum + 2) + ".zst");
+            });
+        }
+
+        auto next = std::max((uint64_t)(1.25 * six.size()), 10000000UL);
         std::cout << "Allocating " << next << " for tile sum " << (current_tile_sum + 6) << '\n';
 
-        if (c3.capacity() < next || next <  100000) {
+        if (c3.capacity() < next || next < 100000) {
             c3.~StupidHashMap();
             new (&c3) StupidHashMap(next);
         }
