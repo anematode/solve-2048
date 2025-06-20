@@ -53,11 +53,16 @@ struct StupidHashMap {
     std::atomic<int> count;  // lazily updated by threads
 
     StupidHashMap(uint64_t needed_capacity) : cap_lg2(std::max(64 - __builtin_clzll(needed_capacity - 1), MIN_CAP_LG2)) {
-        auto huge = cap_lg2 > 20 ? (MAP_HUGETLB | (30 << MAP_HUGE_SHIFT)) : 0;
+        auto huge = 0; //cap_lg2 > 20 ? (MAP_HUGETLB | (30 << MAP_HUGE_SHIFT)) : 0;
+        try_again:
         data = (uint64_t*)mmap(NULL, std::max(capacity() * sizeof(uint64_t), 4096UL), PROT_READ | PROT_WRITE,
                 MAP_PRIVATE | MAP_ANONYMOUS | huge, -1, 0);
         if (data == MAP_FAILED) {
             std::cerr << "Failed to allocate " << capacity() << " words (huge TLB working?)\n";
+            if (huge) {
+                huge = 0;
+                goto try_again;
+            }
             throw std::bad_alloc();
         }
         madvise(data, capacity(), MADV_WILLNEED);
@@ -128,6 +133,11 @@ struct StupidHashMap {
             index = (index + 1) % capacity();
         }
         return false;
+    }
+
+    void prefetch(uint64_t entry) {
+        uint64_t index = get_hash_index(entry) % capacity();
+        _mm_prefetch(&data[index], _MM_HINT_T0);
     }
 
     // Returns true iff something new was inserted

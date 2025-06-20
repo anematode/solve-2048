@@ -1,6 +1,8 @@
 #include "Position.h"
 #include <assert.h>
 #include "MoveLUT.h"
+#include <iostream>
+#include <cstring>
 
 void split_nibble_shuffle(__m256i shuf, __m256i* hi, __m256i* lo) {
 	const __m256i lo_nibble_msk = _mm256_set1_epi8(0xf);
@@ -49,6 +51,57 @@ __m512i shuffle_nibbles(__m512i data, __m512i idx) {
 __attribute__((always_inline))
 __m512i shuffle_nibbles_same(__m512i data, uint64_t idx) {
 	return shuffle_nibbles(data, _mm512_set1_epi64(idx));
+}
+
+Position::Position(uint64_t bits): bits(bits) {}
+
+uint64_t Position::hash() const {
+	uint8_t key_bytes[16] = {
+		0x42, 0x7a, 0x13, 0x9d, 0xfe, 0x5c, 0x88, 0x21,
+		0xde, 0xad, 0xbe, 0xef, 0x77, 0x66, 0x55, 0x44
+	};
+	__m128i key = _mm_loadu_si128(reinterpret_cast<const __m128i*>(key_bytes));
+
+	// Zero-extend or duplicate the 64-bit input to 128 bits
+	alignas(16) uint64_t input_block[2] = {bits, bits};  // or {input, input} if you prefer
+	__m128i data = _mm_loadu_si128(reinterpret_cast<const __m128i*>(input_block));
+
+	__m128i result = _mm_aesenc_si128(_mm_aesenc_si128(_mm_aesenc_si128(data, key), key), key);
+
+	// Extract and return the lower 64 bits of the result
+	alignas(16) uint64_t output[2];
+	_mm_storeu_si128(reinterpret_cast<__m128i*>(output), result);
+	return output[0];
+}
+
+__m256i tile_values(uint64_t bits) {
+	// Demented, but probably pretty fast
+	__m256i splat = _mm256_set1_epi64x(bits);
+	// Put each nibble in the bottom 4 bits of a 16-bit word
+	__m256i shuffled = _mm256_multishift_epi64_epi8(
+		_mm256_set_epi16(0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60), splat);
+	// Look up tile values
+	return _mm256_permutexvar_epi16(shuffled, _mm256_set_epi16(
+			1 << 15, 1 << 14, 1 << 13, 1 << 12, 1 << 11, 1 << 10, 1 << 9, 1 << 8,
+			1 << 7, 1 << 6, 1 << 5, 1 << 4, 1 << 3, 1 << 2, 1 << 1, 0
+		));
+}
+
+
+uint32_t Position::tile_sum() const {
+	return (uint16_t)_mm256_reduce_add_epi16(tile_values(bits));
+}
+
+uint8_t Position::max_tile() const {
+	return ::max_tile(bits);
+}
+
+Position Position::set_tile(int index, uint8_t tile) const {
+	return Position { ::set_tile(bits, tile, index) };
+}
+
+std::string Position::to_string() const {
+	return position_to_string(bits);
 }
 
 __attribute__((always_inline))
@@ -215,3 +268,6 @@ void list_successors(std::vector<uint64_t> &vec, uint64_t tiles, int tile) {
 	}
 }
 
+Position Position::canonical_form() const {
+	return Position { canonicalize_position(bits) };
+}

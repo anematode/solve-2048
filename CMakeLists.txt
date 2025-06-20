@@ -11,14 +11,17 @@ set(SOURCES StupidHashMap.h
         Compressor.h
         doctest.h
         Test.cpp
-        libdivide.h)
+        libdivide.h
+        AdvancedHashSet.h
+        MemoryBudget.h
+        AdvancedHashSet.cpp)
 
 add_library(solve_2048_lib ${SOURCES})
 add_executable(solve_2048 main.cpp)
 add_executable(test Test.cpp)
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -march=native -fopenmp -g")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native -fopenmp -g")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -march=native -fopenmp -g -DNDEBUG")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native -fopenmp -g -DNDEBUG")
 
 find_package(TBB REQUIRED)
 find_library(ZSTD_LIB zstd REQUIRED)

@@ -13,6 +13,7 @@
 
 #include "StupidHashMap.h"
 #include "Position.h"
+#include "AdvancedHashSet.h"
 
 thread_local std::vector<uint64_t> next_tl;
 thread_local std::vector<uint64_t> next_tl2;
@@ -110,159 +111,41 @@ bool compress_data(const char* data, size_t bytes, const std::string& filename) 
     return true;
 }
 
-
-struct Vectorish {
-    virtual uint64_t& operator[] (size_t index) = 0;
-    virtual size_t size();
-    virtual ~Vectorish();
-};
-
-struct StdVectorWrapper : public Vectorish {
-    std::vector<uint64_t> contents;
-
-    uint64_t& operator[] (size_t index) override {
-        return contents[index];
-    }
-    size_t size() override {
-        return contents.size();
-    }
-    void push_back(uint64_t data) {
-        contents.push_back(data);
-    }
-};
-
-struct FixedSizeBackedWrapper : public Vectorish {
-    std::string filename; // Stores the name of the temporary file
-    uint64_t *mapped;     // Pointer to the memory-mapped region
-    size_t size_;         // Logical size (number of uint64_t elements)
-    int fd;               // File descriptor for the temporary file
-
-    // Constructor: Initializes the wrapper with a specified size,
-    // creating and mapping a temporary file.
-    FixedSizeBackedWrapper(size_t size) : mapped(nullptr), size_(0), fd(-1) {
-        if (size == 0) {
-            size_ = 0;
-            return;
-        }
-        size_t bytes_to_map;
-        if (__builtin_mul_overflow(size, sizeof(uint64_t), &bytes_to_map)) {
-            throw std::runtime_error("FixedSizeBackedWrapper: Size calculation overflow, requested size too large.");
-        }
-
-        char temp_filename_template[] = "/tmp/fixed_backed_XXXXXX"; // Template for mkstemp
-        fd = mkstemp(temp_filename_template);
-        if (fd == -1) {
-            throw std::runtime_error("FixedSizeBackedWrapper: Failed to create temporary file.");
-        }
-        filename = temp_filename_template;
-        if (ftruncate(fd, bytes_to_map) == -1) {
-            close(fd);
-            unlink(filename.c_str());
-            throw std::runtime_error("FixedSizeBackedWrapper: Failed to set file size with ftruncate.");
-        }
-
-        mapped = static_cast<uint64_t*>(mmap(nullptr, bytes_to_map, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0));
-        if (mapped == MAP_FAILED) {
-            close(fd);
-            unlink(filename.c_str());
-            throw std::runtime_error("FixedSizeBackedWrapper: Failed to mmap file.");
-        }
-
-        size_ = size;
-    }
-
-    uint64_t *begin() {
-        return mapped;
-    }
-
-    uint64_t *end() {
-        return mapped + size_;
-    }
-
-    uint64_t& operator[] (size_t index) override {
-        if (index >= size_) {
-            throw std::out_of_range("FixedSizeBackedWrapper: Index out of bounds");
-        }
-        return mapped[index];
-    }
-
-    size_t size() override {
-        return size_;
-    }
-
-    ~FixedSizeBackedWrapper() override {
-        if (mapped != nullptr && mapped != MAP_FAILED) {
-            size_t bytes_to_unmap = 0;
-            if (size_ > 0) {
-                 bytes_to_unmap = size_ * sizeof(uint64_t);
-            }
-            if (bytes_to_unmap > 0) {
-                if (munmap(mapped, bytes_to_unmap) == -1) {
-                    std::cerr << "Warning: Failed to munmap memory in FixedSizeBackedWrapper destructor." << std::endl;
-                }
-            }
-        }
-
-        // Close the file descriptor if it's valid.
-        if (fd != -1) {
-            if (close(fd) == -1) {
-                 std::cerr << "Warning: Failed to close file descriptor in FixedSizeBackedWrapper destructor." << std::endl;
-            }
-        }
-
-        // Unlink (delete) the temporary file if its name is known.
-        if (!filename.empty()) {
-            if (unlink(filename.c_str()) == -1) {
-                std::cerr << "Warning: Failed to unlink temporary file in FixedSizeBackedWrapper destructor." << std::endl;
-            }
-        }
-    }
-};
-
-void census(const std::vector<uint64_t> & h2, int tile_sum) {
-    uint64_t max_2 = 0, max_4 = 0, max_8 = 0, max_16 = 0, max_32 = 0, max_64 = 0, max_128 = 0, max_256 = 0, max_512 = 0;
-#pragma omp parallel for reduction(+:max_2,max_4,max_8,max_16,max_32,max_64,max_128,max_256,max_512)
-    for (size_t i = 0; i < h2.size(); ++i) {
-        auto tile = max_tile(h2[i]);
-        max_2 += tile == 1;
-        max_4 += tile == 2;
-        max_8 += tile == 3;
-        max_16 += tile == 4;
-        max_32 += tile == 5;
-        max_64 += tile == 6;
-        max_128 += tile == 7;
-        max_256 += tile == 8;
-        max_512 += tile == 9;
-    }
-    std::cout << "Census for tile sum " << tile_sum << ": " << max_2 << ',' << max_4 << ',' <<
-         max_8 << ',' << max_16 << ',' << max_32 << ',' << max_64 << ',' << max_128 << ',' << max_256 << ',' << max_512 << '\n';
-}
-
 int main()
 {
     uint32_t h1_tile_sum = 4;  // 4, 6, 8
-omp_set_num_threads(omp_get_max_threads());
+    omp_set_num_threads(omp_get_max_threads());
 
-    std::vector<uint64_t>  h1, h2, h3;
+    AdvancedHashSet::Config config = {
+        .tile_sum = 4,
+        .initial_size = 100,
+        .load_factor = 1.0
+    };
+
+    AdvancedHashSet h1(config);
+    config.tile_sum = 6;
+    AdvancedHashSet h2(config);
+    config.tile_sum = 8;
+    AdvancedHashSet h3(config);
+
     std::vector<uint64_t> all = starting_positions();
 
     for (auto b : all) {
         auto sum = tile_sum(b);
-        (sum == 4 ? h1 : sum == 6 ? h2 : h3).push_back(b);
+        (sum == 4 ? h1 : sum == 6 ? h2 : h3).insert(Position { b });
     }
-
-    StupidHashMap c3(h3);
 
     // Build additional elements of c2 from c1
     std::vector<uint64_t> next;
-    std::for_each(h1.begin(), h1.end(), [&] (uint64_t pos) {
-        list_successors(next, pos, 1);
+    h1.for_each_position_parallel([&] (Position pos) {
+        list_successors(next, pos.bits, 1);
         for (auto succ : next) {
-            if (std::find(h2.begin(), h2.end(), succ) == h2.end()) {
-                h2.push_back(succ);
-            }
+            h2.insert(Position { succ });
         }
-    });
+    }, 1);
+
+    h1.gorge();
+    h2.gorge();
 
     std::unordered_map<uint32_t /* tile sum */, size_t /* micros */> compute_time;
     std::unordered_map<uint32_t, size_t> count;
@@ -277,46 +160,59 @@ omp_set_num_threads(omp_get_max_threads());
         auto start = std::chrono::steady_clock::now();
 
         // Build c3 from c1, c2
-#pragma omp parallel for
-        for (size_t i = 0; i < h1.size(); ++i) {
-            list_successors(next_tl, h1[i], 2);
-            std::sort(next_tl.begin(), next_tl.end());
-            next_tl.erase(std::unique(next_tl.begin(), next_tl.end()), next_tl.end());
-            for (auto succ : next_tl) {
-                c3.insert(succ);
-            }
+        timed_run("insert h1", [&] {
+            h1.for_each_position_parallel([&] (Position p) {
+                list_successors(next_tl, p.bits, 2);
+                for (auto succ : next_tl) {
+                    h3.insert(Position { succ } );
+                }
+            });
+        });
+        std::vector<std::vector<uint64_t>> per_thread_census;
+        for (int i = 0; i < omp_get_max_threads(); ++i) {
+            per_thread_census.push_back(std::vector<uint64_t> (12));
         }
+        timed_run("insert h2", [&] {
+            h2.for_each_position_parallel([&] (Position p) {
+                per_thread_census[omp_get_thread_num()][p.max_tile()]++;
+                list_successors(next_tl, p.bits, 1);
+                for (auto succ : next_tl) {
+                    h3.insert(Position { succ } );
+                }
+            });
+        });
 
-#pragma omp parallel for
-        for (size_t i = 0; i < h2.size(); ++i) {
-            list_successors(next_tl, h2[i], 1);
-            std::sort(next_tl.begin(), next_tl.end());
-            next_tl.erase(std::unique(next_tl.begin(), next_tl.end()), next_tl.end());
-            for (auto succ : next_tl) {
-                c3.insert(succ);
+        std::cout << "Max tile census: ";
+        for (int tile_i = 1; tile_i < 12; ++tile_i) {
+            uint64_t total = 0;
+            for (int j = 0; j < per_thread_census.size(); ++j) {
+                total += per_thread_census[j][tile_i];
             }
+            std::cout << (1 << tile_i) << ": " << total << "; ";
         }
+        std::cout << std::endl;
 
         // c1 = c2, c2 = c3, allocate new c3
-        std::swap(h1, h2);
-        timed_run("parallel copy",
-        [&] { c3.parallel_copy_into(h2); });
+        h1 = std::move(h2);
+        timed_run("h3 gorge", [&] {
+            h3.gorge();
+        });
+        h2 = std::move(h3);
 
-        census(h2, h1_tile_sum + 2);
+        // census(h2, h1_tile_sum + 2);
+        auto next = (uint64_t)(h3.capacity * 1.2);
 
-        auto next = std::max({ std::min((2 * h2.size()), 69793218560UL), (uint64_t)(1.2 * h2.size()), 10000000UL });
-        std::cout << "Allocating " << next << " for tile sum " << (h1_tile_sum + 6) << '\n';
+        std::cout << "Allocating " << next << " for tile sum " << (h1_tile_sum + 4) << '\n';
 
-        if (c3.capacity() < next || next < 100000) {
-            c3.~StupidHashMap();
-            new (&c3) StupidHashMap(next);
-        }
+        config.tile_sum = h1_tile_sum + 4;
+        config.initial_size = std::max(next, 10000000UL);
+        new (&h3) AdvancedHashSet(config);
 
-        count[h1_tile_sum + 2] = h2.size();
+        count[h2.tile_sum] = h2.parallel_count();
         auto end = std::chrono::steady_clock::now();
-        compute_time[h1_tile_sum + 2] = (size_t)((end - start).count() / 1000);
+        compute_time[h2.tile_sum] = (size_t)((end - start).count() / 1000);
 
         print_stats();
-        std::cout << "Generation rate: " << (count[h1_tile_sum + 2] / (double)compute_time[h1_tile_sum + 2]) << "M positions/sec" << '\n';
+        std::cout << "Generation rate: " << (count[h2.tile_sum] / (double)compute_time[h2.tile_sum]) << "M positions/sec" << '\n';
     }
 }
