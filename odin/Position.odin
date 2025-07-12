@@ -3,11 +3,15 @@ import "core:fmt"
 import "core:simd"
 import "core:strconv"
 import "core:strings"
+import "core:testing"
+import "core:math/rand"
+import "base:runtime"
 
 foreign import modern "Position.asm"
 foreign modern {
-	__test_add    :: proc "c" (a: #simd [8]f32, p: #simd [8]f32) -> #simd [8]f32 ---
-	__tile_values :: proc "c" (tiles: u64) -> #simd [16] u16 ---
+	__test_add  :: proc "c" (a: #simd [8]f32, p: #simd [8]f32) -> #simd [8]f32 ---
+	__tile_sum  :: proc "c" (tiles: u64) -> u32 ---
+	__canonical :: proc "c" (tiles: u64) -> u64 ---
 }
 
 // Constants
@@ -28,12 +32,11 @@ RawPosition :: #simd [16] u16;
 set_tile :: proc(tiles: Position, tile: u8, index: int) -> Position
 {
 	assert(index >= 0 && index < 16);
-
 	mask: Position = 0xF << u32(4 * index);
 	return (tiles & ~mask) | (Position(tile & 0xF) << u32(4 * index));
 }
 
-get_tile :: proc(tiles: Position, index: int) -> u8
+tile :: proc(tiles: Position, index: int) -> u8
 {
 	assert(index >= 0 && index < 16);
 	return cast(u8) (tiles >> u32(index*4)) & 0xF;
@@ -49,24 +52,86 @@ to_string :: proc(tiles: Position) -> string
 	builder : strings.Builder;
 	strings.builder_init(&builder, context.temp_allocator);
 	for i in 0..<16 {
-		strings.write_u64(&builder, auto_cast tile_value(get_tile(tiles, i)), 10);
+		strings.write_u64(&builder, auto_cast tile_value(tile(tiles, i)), 10);
 		strings.write_rune(&builder, '\n' if i % 4 == 3 else '\t');
 	}
 	return strings.to_string(builder);
 }
 
+tile_sum_real :: proc(tiles: Position) -> u32
+{
+	sum: u32;
+	for i in 0..<16 {
+		sum += tile_value(tile(tiles, i));
+	}
+	return sum;
+}
+
 tile_sum :: proc(tiles: Position) -> u32
 {
-	when false {
-		sum: u32;
-		for i in 0..<16 {
-			sum += tile_value(get_tile(tiles, i));
-		}
-		return sum;
+	return __tile_sum(u64(tiles));
+}
+
+max_tile :: proc(tiles: Position) -> u8
+{
+	tile: u8;
+	for i in 0..<16 {
+		tile = max(tile, cast(u8) (tiles >> u32(4 * i)) & 0xF);
 	}
-	else {
-		return simd.reduce_add_pairs(__tile_values(u64(tiles)));
+	return tile;
+}
+
+canonical :: proc(tiles: Position) -> Position
+{
+	return auto_cast __canonical(cast(u64) tiles);	
+}
+
+starting_positions :: proc() -> [dynamic] Position
+{
+	//bit_set(u64) result;
+//	for (int i = 0; i < 16; ++i) {
+//		for (int j = i + 1; j < 16; ++j) {
+//			for (int tile1 = 1; tile1 <= 2; ++tile1) {
+//				for (int tile2 = 1; tile2 <= 2; ++tile2) {
+//					uint64_t a = 0;
+//
+//					a = set_tile(a, tile1, i);
+//					a = set_tile(a, tile2, j);
+//
+//					result.insert(canonicalize_position(a) );
+//				}
+//			}
+//		}
+//	}
+//	std::vector<uint64_t> v;
+//	std::copy(result.begin(), result.end(), std::back_inserter(v));
+//	return v;
+	return {};
+}
+
+
+random_position :: proc(t: ^testing.T) -> Position
+{
+	state := rand.create(t.seed);
+	rng := runtime.default_random_generator(&state);
+	p: Position;
+	for i in 0..<16 {
+		tile := rand.choice([]u8 {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}, rng)
+		p = set_tile(p, tile, i);
 	}
+	return p;
+}
+
+// NOTE: There is a bug in tile sum where if the sum overflows u16, then it can fail
+@test test_tile_sum :: proc(t: ^testing.T)
+{
+	p := random_position(t);
+	testing.expect_value(t, tile_sum(p), tile_sum_real(p))
+}
+@test test_max_tile :: proc(t: ^testing.T)
+{
+	p: Position = 0x302011032150304
+	testing.expect(t, max_tile(p) == 5)
 }
 
 /*
@@ -82,27 +147,14 @@ tile_sum :: proc(tiles: Position) -> u32
     Position move_right() const;
     uint64_t hash() const;
 
-    auto operator<=>(const Position& right) const = default;
-
     // Permute this position according to one of the shuffle constants
     Position permute(uint64_t shuffle) const;
-
-    // Find the lexicographically smallest position of all rotations and reflections. The resulting
-    // position is guaranteed to be smaller than 3*2^60 because all reachable positions have a corner
-    // that is a 0, 2, or 4.
-    Position canonical_form() const;
 
     // Return whether the position is canonical. Useful for debugging.
     bool is_canonical() const {
         return canonical_form() == *this;
     }
-    // Return the tile sum.
-    uint32_t tile_sum() const;
 
-    // Get the nth tile, 0 <= index <= 15. 0 -> empty, 1 -> 2, etc.
-    uint8_t operator[] (int index) const {
-        return (bits >> (4 * index)) & 0xF;
-    }
     // Get the nth row, 0 <= row <= 3.
     uint16_t nth_row(int index) const {
         return bits >> (16 * index);
